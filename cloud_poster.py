@@ -293,6 +293,28 @@ def graph_post(path, data):
     return body["id"]
 
 
+def check_token():
+    """A read only call, so it proves the token without posting anything."""
+    ig_user = need("IG_USER_ID")
+    token = need("IG_ACCESS_TOKEN")
+    resp = requests.get(
+        f"{GRAPH}/{ig_user}",
+        params={"fields": "id,username", "access_token": token},
+        timeout=30,
+    )
+    body = resp.json() if resp.content else {}
+    if resp.status_code == 200 and body.get("id"):
+        log(f"token OK. Connected to @{body.get('username', 'unknown')} ({body['id']}).")
+        return True
+    error = body.get("error") or {}
+    if error.get("code") == 190:
+        log("token REJECTED.")
+        print(TOKEN_HELP)
+    else:
+        log(f"token check failed: {resp.status_code} {json.dumps(body)[:300]}")
+    return False
+
+
 def token_age_warning():
     """Warn before the 60 day token dies, rather than after."""
     issued = (os.environ.get("IG_TOKEN_ISSUED") or "").strip()
@@ -409,11 +431,17 @@ def main():
     ap = argparse.ArgumentParser(description="Post approved, due carousels.")
     ap.add_argument("--dry-run", action="store_true",
                     help="check everything, call no Graph API write")
+    ap.add_argument("--check-token", action="store_true",
+                    help="say whether the Instagram token still works, then stop")
     args = ap.parse_args()
 
     load_local_env()
 
     token_age_warning()
+
+    if args.check_token:
+        check_token()
+        return
 
     repo = normalize_repo(need("GITHUB_REPO"))
     branch = github_branch(repo)
