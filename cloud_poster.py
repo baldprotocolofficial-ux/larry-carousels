@@ -267,12 +267,45 @@ def verify_public(url, attempts=6):
 # ------------------------------------------------------------------- graph --
 
 
+TOKEN_HELP = """The Instagram access token has expired or been revoked. Get a new one:
+  1. developers.facebook.com/tools/explorer, pick your app, generate a User
+     Token with instagram_basic, instagram_content_publish and
+     pages_read_engagement
+  2. developers.facebook.com/tools/debug/accesstoken, paste it in, then click
+     Extend Access Token at the bottom for the 60 day version
+  3. Put it in IG_ACCESS_TOKEN in the cloud environment and in the .env on the
+     machine that renders, and set IG_TOKEN_ISSUED to today
+Nothing will post until that is done."""
+
+
 def graph_post(path, data):
     resp = requests.post(f"{GRAPH}/{path}", data=data, timeout=120)
     body = resp.json() if resp.content else {}
     if resp.status_code != 200 or "id" not in body:
+        error = body.get("error") or {}
+        # 190 is the whole family of expired and revoked token errors. It is by
+        # far the most common way this runner fails, and the raw Graph message
+        # does not say what to do about it.
+        if error.get("code") == 190:
+            message = error.get("message", "token rejected")
+            raise RuntimeError(message + "\n" + TOKEN_HELP)
         raise RuntimeError(f"Graph POST {path} failed: {resp.status_code} {json.dumps(body)[:300]}")
     return body["id"]
+
+
+def token_age_warning():
+    """Warn before the 60 day token dies, rather than after."""
+    issued = (os.environ.get("IG_TOKEN_ISSUED") or "").strip()
+    if not issued:
+        return
+    try:
+        when = datetime.strptime(issued, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        log(f"IG_TOKEN_ISSUED is {issued!r}, not YYYY-MM-DD, so token age is unknown")
+        return
+    days = (datetime.now(timezone.utc) - when).days
+    if days >= 50:
+        log(f"WARNING: the Instagram token is {days} days old and dies at 60. Refresh it.")
 
 
 def wait_finished(container_id, token, timeout_seconds=180):
@@ -379,6 +412,8 @@ def main():
     args = ap.parse_args()
 
     load_local_env()
+
+    token_age_warning()
 
     repo = normalize_repo(need("GITHUB_REPO"))
     branch = github_branch(repo)
