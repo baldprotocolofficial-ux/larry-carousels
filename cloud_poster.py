@@ -349,6 +349,48 @@ def wait_finished(container_id, token, timeout_seconds=180):
     raise RuntimeError(f"container {container_id} never reached FINISHED. Last: {last}")
 
 
+DOWNLOAD_FAILED_SUBCODE = 2207052
+ITEM_ATTEMPTS = 4
+
+
+def item_container_with_retry(ig_user, token, url):
+    """Create one carousel item, retrying when Meta fails to download the image.
+
+    Meta sometimes reports a slide it could not fetch from GitHub as
+    "Only photo or video can be accepted" (code 9004, subcode 2207052), even
+    though the same file is fine and the slides before it were accepted. It is
+    a failed download, not a bad file, so wait and ask again. Each retry adds a
+    query string, which GitHub ignores, so Meta does not reuse a cached failure.
+    """
+    for attempt in range(1, ITEM_ATTEMPTS + 1):
+        target = url if attempt == 1 else f"{url}?try={attempt}"
+        resp = requests.post(
+            f"{GRAPH}/{ig_user}/media",
+            data={"image_url": target, "is_carousel_item": "true", "access_token": token},
+            timeout=120,
+        )
+        body = resp.json() if resp.content else {}
+        if resp.status_code == 200 and "id" in body:
+            if attempt > 1:
+                log(f"  {url.rsplit('/', 1)[-1]} accepted on attempt {attempt}")
+            return body["id"]
+
+        error = body.get("error") or {}
+        if error.get("code") == 190:
+            raise RuntimeError(error.get("message", "token rejected") + "\n" + TOKEN_HELP)
+
+        download_failed = error.get("error_subcode") == DOWNLOAD_FAILED_SUBCODE
+        if not download_failed or attempt == ITEM_ATTEMPTS:
+            raise RuntimeError(
+                f"Graph POST {ig_user}/media failed for {url.rsplit('/', 1)[-1]} "
+                f"after {attempt} attempt(s): {resp.status_code} {json.dumps(body)[:300]}"
+            )
+        wait = 10 * attempt
+        log(f"  Meta could not download {url.rsplit('/', 1)[-1]}, retrying in {wait}s "
+            f"(attempt {attempt} of {ITEM_ATTEMPTS})")
+        time.sleep(wait)
+
+
 def post_carousel(item, urls, dry_run):
     ig_user = need("IG_USER_ID")
     token = need("IG_ACCESS_TOKEN")
@@ -359,13 +401,13 @@ def post_carousel(item, urls, dry_run):
 
     children = []
     for url in urls:
-        cid = graph_post(
-            f"{ig_user}/media",
-            {"image_url": url, "is_carousel_item": "true", "access_token": token},
-        )
+        cid = item_container_with_retry(ig_user, token, url)
         wait_finished(cid, token)
         children.append(cid)
         log(f"  container {cid} for {url.rsplit('/', 1)[-1]}")
+        # A short gap between fetches. Meta pulls every slide from GitHub in
+        # quick succession, and a burst is when its download fails.
+        time.sleep(2)
 
     creation_id = graph_post(
         f"{ig_user}/media",
